@@ -1,0 +1,6 @@
+{
+  "name": "ApkSigner",
+  "description": "Ekstrak ZIP ke folder khusus, tanda tangani APK, buat & kelola Keystore, kelola & install APK yang sudah ditandatangani, dan verifikasi tanda tangan digital.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
