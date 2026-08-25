@@ -71,16 +71,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
-    private fun handleIntent(intent: Intent) {
-        if (intent.action == Intent.ACTION_VIEW || intent.action == Intent.ACTION_SEND) {
-            val uri = intent.data ?: intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+    private fun handleIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        if (action == Intent.ACTION_VIEW || action == Intent.ACTION_SEND || action == Intent.ACTION_EDIT) {
+            val uri = intent.data
+                ?: intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+
             if (uri != null) {
                 lifecycleScope.launch(Dispatchers.IO) {
                     val file = copyUriToCache(uri)
-                    _incomingFile.value = file
+                    if (file != null) {
+                        _incomingFile.value = file
+                    }
                 }
             }
         }
@@ -88,24 +96,45 @@ class MainActivity : ComponentActivity() {
 
     private fun copyUriToCache(uri: Uri): File? {
         try {
-            var name = "shared_file"
-            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx != -1) name = cursor.getString(idx)
+            var name: String? = null
+            try {
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx != -1) {
+                            name = cursor.getString(idx)
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+
+            if (name.isNullOrBlank()) {
+                name = uri.lastPathSegment?.substringAfterLast("/")
+            }
+
+            if (name.isNullOrBlank()) {
+                name = "incoming_file_${System.currentTimeMillis()}"
+            }
+
+            val mimeType = try { contentResolver.getType(uri) } catch (_: Exception) { null } ?: ""
+            if (!name!!.contains(".")) {
+                if (mimeType.contains("zip", ignoreCase = true) || mimeType.contains("compressed", ignoreCase = true)) {
+                    name += ".zip"
+                } else if (mimeType.contains("android.package-archive", ignoreCase = true) || mimeType.contains("apk", ignoreCase = true)) {
+                    name += ".apk"
+                } else {
+                    name += ".zip"
                 }
             }
-            if (!name.contains(".")) {
-                val type = contentResolver.getType(uri)
-                if (type == "application/zip") name += ".zip"
-                else if (type == "application/vnd.android.package-archive") name += ".apk"
-            }
-            val cacheFile = File(cacheDir, name)
+
+            val cleanName = name!!.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+            val cacheFile = File(cacheDir, "incoming_${System.currentTimeMillis()}_$cleanName")
             contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(cacheFile).use { output ->
                     input.copyTo(output)
                 }
-            }
+            } ?: return null
+
             return cacheFile
         } catch (e: Exception) {
             e.printStackTrace()

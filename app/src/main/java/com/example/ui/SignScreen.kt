@@ -78,7 +78,8 @@ fun SignScreen(
     LaunchedEffect(preselectedFile) {
         if (preselectedFile != null && preselectedFile.exists()) {
             selectedFileName = preselectedFile.name
-            isZipFile = preselectedFile.extension.equals("zip", ignoreCase = true)
+            val ext = preselectedFile.extension.lowercase()
+            isZipFile = ext in listOf("zip", "xapk", "apks") || preselectedFile.name.endsWith(".zip", ignoreCase = true)
         }
     }
 
@@ -96,7 +97,8 @@ fun SignScreen(
             } catch (_: Exception) {}
             selectedFileName = name
             val type = context.contentResolver.getType(uri) ?: ""
-            isZipFile = type == "application/zip" || name.endsWith(".zip", ignoreCase = true)
+            val ext = name.substringAfterLast(".", "").lowercase()
+            isZipFile = type == "application/zip" || type == "application/x-zip-compressed" || ext in listOf("zip", "xapk", "apks") || name.endsWith(".zip", ignoreCase = true)
         }
     }
 
@@ -164,44 +166,65 @@ fun SignScreen(
                 if (selectedFileName.isNotEmpty()) {
                     Surface(
                         color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(14.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .background(
-                                        if (isZipFile) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.primaryContainer,
-                                        RoundedCornerShape(8.dp)
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    if (isZipFile) Icons.Default.FolderZip else Icons.Default.Android,
-                                    contentDescription = null,
-                                    tint = if (isZipFile) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .background(
+                                            if (isZipFile) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.primaryContainer,
+                                            RoundedCornerShape(8.dp)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        if (isZipFile) Icons.Default.FolderZip else Icons.Default.Android,
+                                        contentDescription = null,
+                                        tint = if (isZipFile) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        selectedFileName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        if (isZipFile) "Format Arsip ZIP (Tanda tangani APK di dalamnya)" else "Format APK Tunggal",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
-                            Spacer(Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    selectedFileName,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = !isZipFile,
+                                    onClick = { isZipFile = false },
+                                    label = { Text("APK Tunggal", fontSize = 11.sp) },
+                                    leadingIcon = {
+                                        if (!isZipFile) Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    }
                                 )
-                                Text(
-                                    if (isZipFile) "Format ZIP (Akan menandatangani semua APK di dalam ZIP)" else "Format APK Langsung",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                FilterChip(
+                                    selected = isZipFile,
+                                    onClick = { isZipFile = true },
+                                    label = { Text("Arsip ZIP", fontSize = 11.sp) },
+                                    leadingIcon = {
+                                        if (isZipFile) Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    }
                                 )
                             }
                         }
@@ -441,10 +464,11 @@ fun SignScreen(
                     val uri = selectedUri
                     val localFile = preselectedFile
 
-                    if (isZipFile && uri != null) {
+                    if (isZipFile) {
                         val result = SignerLogic.processZipAndSign(
                             context = context,
                             zipUri = uri,
+                            zipFileInput = localFile,
                             outputDir = outputDir,
                             keystoreFile = targetKeystoreFile,
                             keystorePass = actualKeystorePass,
@@ -453,6 +477,7 @@ fun SignScreen(
                             enableV1 = enableV1,
                             enableV2 = enableV2,
                             enableV3 = enableV3,
+                            minSdkVersion = 24,
                             onProgress = { progressMsg = it }
                         )
                         isSigning = false
@@ -465,9 +490,9 @@ fun SignScreen(
                         }
                     } else {
                         // Direct APK
+                        val cachedApk = File(context.cacheDir, "temp_sign_${System.currentTimeMillis()}.apk")
                         try {
                             progressMsg = "Mengekstrak dan memproses APK..."
-                            val cachedApk = File(context.cacheDir, "temp_sign_${System.currentTimeMillis()}.apk")
 
                             if (uri != null) {
                                 context.contentResolver.openInputStream(uri)?.use { input ->
@@ -494,10 +519,10 @@ fun SignScreen(
                                     keyPass = actualKeyPass,
                                     enableV1 = enableV1,
                                     enableV2 = enableV2,
-                                    enableV3 = enableV3
+                                    enableV3 = enableV3,
+                                    minSdkVersion = 24
                                 )
                             }
-                            cachedApk.delete()
                             isSigning = false
 
                             if (res.isSuccess) {
@@ -510,6 +535,10 @@ fun SignScreen(
                         } catch (e: Exception) {
                             isSigning = false
                             errorMsg = e.message
+                        } finally {
+                            if (cachedApk.exists()) {
+                                cachedApk.delete()
+                            }
                         }
                     }
                 }

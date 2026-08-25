@@ -48,9 +48,14 @@ object SignerLogic {
         keyPass: String,
         enableV1: Boolean = true,
         enableV2: Boolean = true,
-        enableV3: Boolean = true
+        enableV3: Boolean = true,
+        minSdkVersion: Int = 24
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            if (!inputApk.exists()) {
+                return@withContext Result.failure(Exception("File APK sumber tidak ditemukan: ${inputApk.name}"))
+            }
+
             val ks = KeystoreManager.loadKeyStore(keystoreFile, keystorePass)
             val key = ks.getKey(keyAlias, keyPass.toCharArray())
                 ?: return@withContext Result.failure(Exception("Kunci dengan alias '$keyAlias' tidak ditemukan dalam Keystore."))
@@ -63,14 +68,15 @@ object SignerLogic {
 
             outputApk.parentFile?.mkdirs()
 
-            val apkSigner = ApkSigner.Builder(listOf(signerConfig))
+            val builder = ApkSigner.Builder(listOf(signerConfig))
                 .setInputApk(inputApk)
                 .setOutputApk(outputApk)
+                .setMinSdkVersion(minSdkVersion)
                 .setV1SigningEnabled(enableV1)
                 .setV2SigningEnabled(enableV2)
                 .setV3SigningEnabled(enableV3)
-                .build()
 
+            val apkSigner = builder.build()
             apkSigner.sign()
             Result.success(Unit)
         } catch (e: Exception) {
@@ -158,7 +164,8 @@ object SignerLogic {
 
     suspend fun processZipAndSign(
         context: Context,
-        zipUri: Uri,
+        zipUri: Uri? = null,
+        zipFileInput: File? = null,
         outputDir: File,
         keystoreFile: File,
         keystorePass: String,
@@ -167,48 +174,97 @@ object SignerLogic {
         enableV1: Boolean = true,
         enableV2: Boolean = true,
         enableV3: Boolean = true,
+        minSdkVersion: Int = 24,
         onProgress: (String) -> Unit
     ): Result<List<File>> = withContext(Dispatchers.IO) {
+        val cachedZip = File(context.cacheDir, "temp_process_${System.currentTimeMillis()}.zip")
+        var zipFileInstance: ZipFile? = null
         try {
             if (!outputDir.exists()) outputDir.mkdirs()
 
-            onProgress("Membaca file ZIP...")
-            val cachedZip = File(context.cacheDir, "temp_process_${System.currentTimeMillis()}.zip")
-            context.contentResolver.openInputStream(zipUri)?.use { input ->
-                FileOutputStream(cachedZip).use { output ->
-                    input.copyTo(output)
-                }
-            } ?: return@withContext Result.failure(Exception("Tidak dapat membaca file ZIP sumber."))
-
-            val signedApks = mutableListOf<File>()
-            val zipFile = ZipFile(cachedZip)
-            val apkEntries = zipFile.entries().asSequence().filter { it.name.endsWith(".apk", ignoreCase = true) }.toList()
-
-            if (apkEntries.isEmpty()) {
-                zipFile.close()
-                cachedZip.delete()
-                return@withContext Result.failure(Exception("Tidak ditemukan file .apk di dalam ZIP."))
-            }
-
-            var count = 0
-            val total = apkEntries.size
-
-            apkEntries.forEach { entry ->
-                count++
-                val simpleName = entry.name.substringAfterLast("/").substringBeforeLast(".")
-                onProgress("Mengekstrak ($count/$total): ${entry.name.substringAfterLast("/")}...")
-                val extractedApk = File(context.cacheDir, "ext_${System.currentTimeMillis()}_${entry.name.substringAfterLast("/")}")
-                zipFile.getInputStream(entry).use { input ->
-                    FileOutputStream(extractedApk).use { output ->
+            onProgress("Membaca file arsip...")
+            if (zipUri != null) {
+                context.contentResolver.openInputStream(zipUri)?.use { input ->
+                    FileOutputStream(cachedZip).use { output ->
                         input.copyTo(output)
                     }
+                } ?: return@withContext Result.failure(Exception("Tidak dapat membaca file arsip dari URI."))
+            } else if (zipFileInput != null && zipFileInput.exists()) {
+                AppStorageManager.copyFile(zipFileInput, cachedZip)
+            } else {
+                return@withContext Result.failure(Exception("File arsip sumber tidak ditemukan."))
+            }
+
+            val signedApks = mutableListOf<File>()
+            val zipFile = try {
+                ZipFile(cachedZip).also { zipFileInstance = it }
+            } catch (e: Exception) {
+                return@withContext Result.failure(Exception("File bukan format ZIP/APK yang valid: ${e.message}"))
+            }
+
+            val allEntries = zipFile.entries().asSequence().toList()
+            val apkEntries = allEntries.filter { !it.isDirectory && it.name.endsWith(".apk", ignoreCase = true) }
+            val hasRootManifest = allEntries.any { 
+                !it.isDirectory && (it.name.equals("AndroidManifest.xml", ignoreCase = true) || it.name.endsWith("/AndroidManifest.xml", ignoreCase = true)) 
+            }
+
+            if (apkEntries.isNotEmpty()) {
+                var count = 0
+                val total = apkEntries.size
+
+                for (entry in apkEntries) {
+                    count++
+                    val entryFileName = entry.name.substringAfterLast("/")
+                    val simpleName = entryFileName.substringBeforeLast(".").ifEmpty { "app_$count" }
+                    onProgress("Mengekstrak ($count/$total): $entryFileName...")
+                    val extractedApk = File(context.cacheDir, "ext_${System.currentTimeMillis()}_${count}_$entryFileName")
+                    zipFile.getInputStream(entry).use { input ->
+                        FileOutputStream(extractedApk).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+
+                    onProgress("Menandatangani ($count/$total): $simpleName...")
+                    var signedApk = File(outputDir, "${simpleName}_signed.apk")
+                    var counter = 1
+                    while (signedApk.exists()) {
+                        signedApk = File(outputDir, "${simpleName}_signed_$counter.apk")
+                        counter++
+                    }
+
+                    val signResult = signApk(
+                        inputApk = extractedApk,
+                        outputApk = signedApk,
+                        keystoreFile = keystoreFile,
+                        keystorePass = keystorePass,
+                        keyAlias = keyAlias,
+                        keyPass = keyPass,
+                        enableV1 = enableV1,
+                        enableV2 = enableV2,
+                        enableV3 = enableV3,
+                        minSdkVersion = minSdkVersion
+                    )
+
+                    extractedApk.delete()
+
+                    if (signResult.isSuccess) {
+                        signedApks.add(signedApk)
+                    } else {
+                        return@withContext Result.failure(signResult.exceptionOrNull() ?: Exception("Gagal menandatangani ${entry.name}"))
+                    }
+                }
+            } else if (hasRootManifest) {
+                onProgress("Mendeteksi format APK langsung di dalam arsip...")
+                val baseName = zipFileInput?.nameWithoutExtension ?: "app_${System.currentTimeMillis()}"
+                var signedApk = File(outputDir, "${baseName}_signed.apk")
+                var counter = 1
+                while (signedApk.exists()) {
+                    signedApk = File(outputDir, "${baseName}_signed_$counter.apk")
+                    counter++
                 }
 
-                onProgress("Menandatangani ($count/$total): $simpleName...")
-                val signedApk = File(outputDir, "${simpleName}_signed.apk")
-
                 val signResult = signApk(
-                    inputApk = extractedApk,
+                    inputApk = cachedZip,
                     outputApk = signedApk,
                     keystoreFile = keystoreFile,
                     keystorePass = keystorePass,
@@ -216,25 +272,31 @@ object SignerLogic {
                     keyPass = keyPass,
                     enableV1 = enableV1,
                     enableV2 = enableV2,
-                    enableV3 = enableV3
+                    enableV3 = enableV3,
+                    minSdkVersion = minSdkVersion
                 )
-
-                extractedApk.delete()
 
                 if (signResult.isSuccess) {
                     signedApks.add(signedApk)
                 } else {
-                    zipFile.close()
-                    cachedZip.delete()
-                    return@withContext Result.failure(signResult.exceptionOrNull() ?: Exception("Gagal menandatangani ${entry.name}"))
+                    return@withContext Result.failure(signResult.exceptionOrNull() ?: Exception("Gagal menandatangani APK di dalam arsip."))
                 }
+            } else {
+                return@withContext Result.failure(
+                    Exception("Tidak ditemukan file .apk maupun AndroidManifest.xml di dalam ZIP. Pastikan file berisi aplikasi Android (.apk).")
+                )
             }
 
-            zipFile.close()
-            cachedZip.delete()
             Result.success(signedApks)
         } catch (e: Exception) {
             Result.failure(e)
+        } finally {
+            try {
+                zipFileInstance?.close()
+            } catch (_: Exception) {}
+            if (cachedZip.exists()) {
+                cachedZip.delete()
+            }
         }
     }
 
