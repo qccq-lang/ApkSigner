@@ -27,26 +27,23 @@ jobs:
         gradle-version: '9.3.1'
         validate-wrappers: false
 
-    # 1. 编译未签名的 Release APK
+    # 关键修复步骤：如果仓库没有该密钥，则自动生成一个 my-upload-key.jks 供 Gradle 打包使用
+    - name: Prepare Release Keystore
+      run: |
+        if [ ! -f my-upload-key.jks ]; then
+          echo "Generating temporary my-upload-key.jks for release packaging..."
+          keytool -genkey -v -keystore my-upload-key.jks \
+            -alias upload \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=ApkSigner, OU=Android, O=OpenSource, L=Unknown, S=Unknown, C=US"
+        fi
+
     - name: Build Release APK
       run: gradle assembleRelease
 
-    # 2. 自动进行 ZipAlign 和 v1/v2/v3 签名（开源标准动作）
-    - name: Sign & ZipAlign Release APK
-      uses: r0adkll/sign-android-release@v1
-      id: sign_app
-      with:
-        releaseDirectory: app/build/outputs/apk/release
-        signingKey: ${{ secrets.SIGNING_KEY }}
-        alias: ${{ secrets.KEY_ALIAS }}
-        keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
-        keyPassword: ${{ secrets.KEY_PASSWORD }}
-      # 如果你的 gradle 已经在 build.gradle 里配置了签名，可以删掉这个 Step 2
-
-    # 3. 上传签名好的正式版 APK
-    - name: Upload Signed Release APK
+    - name: Upload Release APK
       uses: actions/upload-artifact@v4
       with:
         name: app-release
-        # 如果使用了上面的签名动作，路径使用 output，或者通配符匹配
-        path: ${{ steps.sign_app.outputs.signedReleaseFile || 'app/build/outputs/apk/release/*-release*.apk' }}
+        path: app/build/outputs/apk/release/*.apk
