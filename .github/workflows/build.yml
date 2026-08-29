@@ -68,6 +68,7 @@ jobs:
         RELEASE_STORE_PASSWORD: android
         RELEASE_KEY_PASSWORD: android
         RELEASE_KEY_ALIAS: upload
+        GRADLE_OPTS: "-Dorg.gradle.jvmargs='-Xmx4096m -XX:MaxMetaspaceSize=1024m -XX:+UseParallelGC' -Dorg.gradle.workers.max=2"
       run: |
         gradle assembleRelease \
           -PstorePassword=android \
